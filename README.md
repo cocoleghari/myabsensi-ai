@@ -1,7 +1,12 @@
-# Face Service
+# Face Recognition Service
 
-Python service for face recognition.
+## Tech
+- Python
+- FastAPI
 
 ## Run
 pip install -r requirements.txt
 uvicorn main:app --reload
+
+## Endpoint
+POST /recognize
