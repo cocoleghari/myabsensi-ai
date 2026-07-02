@@ -18,10 +18,21 @@ app = FastAPI()
 # KONFIGURASI
 # ══════════════════════════════════════════════════════════════════════
 
+# PERINGATAN: Jangan naikkan VERIFIED_MARGIN di atas 0.05 tanpa validasi
+# keamanan. Pengujian lapangan membuktikan distance orang BERBEDA bisa
+# serendah 0.25 — overlap langsung dengan kondisi sulit orang yang SAMA.
+# Margin besar = false-accept lebih sering (orang lain bisa absen mewakili).
 VERIFIED_MARGIN = 0.05
 CONFIDENCE_SCALE_FACTOR = 2.0
+
+# Detector order untuk fallback: retinaface (paling akurat) -> opencv
+# (paling robust/ringan) -> mtcnn (alternatif).
+# CATATAN: retinaface di deepface 0.0.79/0.0.85 + retina-face 0.0.17
+# punya bug 'tuple object has no attribute shape' — verify_with_fallback
+# menangani ini secara otomatis dengan lanjut ke opencv.
 PREFERRED_DETECTOR = "retinaface"
 FALLBACK_DETECTOR = "opencv"
+
 STANDARD_MAX_WIDTH = 800
 DARKNESS_THRESHOLD = 100
 CLAHE_CLIP_LIMIT = 2.5
@@ -37,7 +48,6 @@ DENOISE_SEARCH_SIZE = 21
 # ══════════════════════════════════════════════════════════════════════
 
 def resize_standard(img_bgr: np.ndarray) -> np.ndarray:
-    """Resize ke lebar maksimum standar, menjaga aspect ratio. Tidak upscale."""
     h, w = img_bgr.shape[:2]
     if w <= STANDARD_MAX_WIDTH:
         return img_bgr
@@ -47,22 +57,15 @@ def resize_standard(img_bgr: np.ndarray) -> np.ndarray:
 
 
 def apply_clahe_enhancement(img_bgr: np.ndarray) -> np.ndarray:
-    """
-    Terapkan CLAHE pada channel Luminance (L dari LAB color space) supaya
-    kontras membaik tanpa merusak warna asli kulit/wajah.
-    """
     lab = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2LAB)
     l_channel, a_channel, b_channel = cv2.split(lab)
-
     clahe = cv2.createCLAHE(clipLimit=CLAHE_CLIP_LIMIT, tileGridSize=CLAHE_GRID_SIZE)
     l_enhanced = clahe.apply(l_channel)
-
     lab_enhanced = cv2.merge((l_enhanced, a_channel, b_channel))
     return cv2.cvtColor(lab_enhanced, cv2.COLOR_LAB2BGR)
 
 
 def apply_denoise(img_bgr: np.ndarray) -> np.ndarray:
-    """Denoise ringan, dipakai hanya untuk foto kondisi gelap (noise kamera)."""
     return cv2.fastNlMeansDenoisingColored(
         img_bgr, None,
         DENOISE_H, DENOISE_H_COLOR,
@@ -71,23 +74,12 @@ def apply_denoise(img_bgr: np.ndarray) -> np.ndarray:
 
 
 def preprocess_image(raw_bytes: bytes, save_path: str) -> dict:
-    """
-    Pipeline preprocessing standar untuk semua foto sebelum dikirim ke
-    face detector & model recognition:
-      1. Fix rotasi EXIF
-      2. Resize ke lebar standar (konsistensi input, performa)
-      3. Deteksi kondisi gelap -> kalau gelap: CLAHE + denoise ringan
-      4. Simpan sebagai JPEG standar
-
-    Return dict info preprocessing untuk logging/debugging.
-    """
     img = Image.open(io.BytesIO(raw_bytes)).convert("RGB")
     img = ImageOps.exif_transpose(img)
     original_size = img.size
 
     img_array = np.array(img)
     img_bgr = cv2.cvtColor(img_array, cv2.COLOR_RGB2BGR)
-
     img_bgr = resize_standard(img_bgr)
 
     gray = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2GRAY)
@@ -114,18 +106,10 @@ def preprocess_image(raw_bytes: bytes, save_path: str) -> dict:
 
 
 # ══════════════════════════════════════════════════════════════════════
-# DETEKSI WAJAH (untuk validasi jumlah wajah & bounding box)
+# DETEKSI WAJAH
 # ══════════════════════════════════════════════════════════════════════
 
 def detect_faces_with_boxes(image_path: str, detector_backend: str) -> list:
-    """
-    Deteksi semua wajah pada gambar dan kembalikan bounding box-nya.
-    Dipakai untuk:
-      1. Validasi jumlah wajah (0 = error, >1 = pilih wajah utama + warning)
-      2. Data untuk visualisasi bounding box
-
-    Return: list of dict {x, y, w, h, confidence}
-    """
     try:
         faces = DeepFace.extract_faces(
             img_path=image_path,
@@ -153,36 +137,23 @@ def detect_faces_with_boxes(image_path: str, detector_backend: str) -> list:
 
 
 def select_main_face(boxes: list):
-    """
-    Kalau ada lebih dari satu wajah terdeteksi, pilih wajah UTAMA dengan
-    heuristik: area bounding box terbesar.
-    """
     if not boxes:
         return None
     return max(boxes, key=lambda b: b["w"] * b["h"])
 
 
 def draw_bounding_boxes(image_path: str, boxes: list, main_box, output_path: str):
-    """
-    Gambar bounding box di atas foto untuk visualisasi/debugging.
-    Wajah utama digambar hijau, wajah lain digambar oranye.
-    """
     img = cv2.imread(image_path)
     if img is None:
         return
-
     for box in boxes:
         x, y, w, h = box["x"], box["y"], box["w"], box["h"]
         is_main = main_box is not None and box is main_box
         color = (0, 200, 0) if is_main else (0, 165, 255)
         label = "WAJAH UTAMA" if is_main else "diabaikan"
-
         cv2.rectangle(img, (x, y), (x + w, y + h), color, 2)
-        cv2.putText(
-            img, label, (x, max(y - 8, 12)),
-            cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 2,
-        )
-
+        cv2.putText(img, label, (x, max(y - 8, 12)),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 2)
     cv2.imwrite(output_path, img)
 
 
@@ -191,7 +162,6 @@ def draw_bounding_boxes(image_path: str, boxes: list, main_box, output_path: str
 # ══════════════════════════════════════════════════════════════════════
 
 def run_verify(path_absen: str, path_referensi: str, detector_backend: str):
-    """Jalankan DeepFace.verify. Bisa raise ValueError jika wajah tidak terdeteksi."""
     return DeepFace.verify(
         img1_path=path_absen,
         img2_path=path_referensi,
@@ -203,20 +173,51 @@ def run_verify(path_absen: str, path_referensi: str, detector_backend: str):
 
 
 def verify_with_fallback(path_absen: str, path_referensi: str):
-    """Coba PREFERRED_DETECTOR dulu, fallback ke FALLBACK_DETECTOR kalau crash teknis."""
-    try:
-        result = run_verify(path_absen, path_referensi, PREFERRED_DETECTOR)
-        return result, PREFERRED_DETECTOR
-    except ValueError:
-        raise
-    except Exception as backend_err:
-        logger.warning(
-            f"Detector '{PREFERRED_DETECTOR}' gagal dipakai ({backend_err}), "
-            f"fallback ke '{FALLBACK_DETECTOR}'"
-        )
-        result = run_verify(path_absen, path_referensi, FALLBACK_DETECTOR)
-        return result, FALLBACK_DETECTOR
+    """
+    Coba beberapa detector secara berurutan: retinaface -> opencv -> mtcnn.
 
+    Lanjut ke detector berikutnya BAIK kalau ada crash teknis (Exception —
+    misal bug 'tuple object has no attribute shape' di retinaface) MAUPUN
+    kalau wajah gagal terdeteksi (ValueError — misal ekspresi/pose tidak
+    standar yang retinaface tidak bisa handle tapi opencv bisa).
+
+    Hanya raise ValueError kalau SEMUA detector sudah dicoba dan gagal.
+    """
+    detector_order = [PREFERRED_DETECTOR, FALLBACK_DETECTOR, "mtcnn"]
+    last_error = None
+
+    for detector in detector_order:
+        try:
+            result = run_verify(path_absen, path_referensi, detector)
+            if detector != PREFERRED_DETECTOR:
+                logger.info(
+                    f"[FALLBACK_SUCCESS] detector='{detector}' berhasil "
+                    f"setelah detector sebelumnya gagal"
+                )
+            return result, detector
+        except ValueError as e:
+            last_error = e
+            logger.warning(
+                f"[FALLBACK] detector='{detector}' tidak menemukan wajah, "
+                f"coba detector berikutnya..."
+            )
+            continue
+        except Exception as e:
+            last_error = ValueError(str(e))
+            logger.warning(
+                f"[FALLBACK] detector='{detector}' crash ({e}), "
+                f"coba detector berikutnya..."
+            )
+            continue
+
+    raise ValueError(
+        last_error or "Wajah tidak terdeteksi oleh semua detector yang dicoba"
+    )
+
+
+# ══════════════════════════════════════════════════════════════════════
+# ENDPOINTS
+# ══════════════════════════════════════════════════════════════════════
 
 @app.post("/verify")
 async def verify_face(
@@ -237,12 +238,9 @@ async def verify_face(
             f"[PREPROCESS] foto_absen={absen_info} | foto_referensi={ref_info}"
         )
 
-        # ── Validasi jumlah wajah pakai FALLBACK_DETECTOR (opencv) yang lebih ringan ──
-        # FIX: sebelumnya pakai PREFERRED_DETECTOR (retinaface) sehingga retinaface
-        # dipanggil DUA KALI per request (sekali di sini, sekali di verify_with_fallback).
-        # Sekarang validasi jumlah wajah cukup pakai opencv — cepat, ringan, dan akurat
-        # untuk mendeteksi ada/tidaknya wajah. Retinaface hanya dipakai SEKALI di
-        # verify_with_fallback untuk akurasi pengenalan wajah yang lebih tinggi.
+        # Validasi jumlah wajah pakai opencv (ringan, cepat).
+        # Retinaface hanya dipakai sekali di verify_with_fallback untuk
+        # akurasi pengenalan — tidak di-call dua kali per request.
         faces_absen = detect_faces_with_boxes(path_absen, FALLBACK_DETECTOR)
         multi_face_warning = None
 
@@ -260,14 +258,14 @@ async def verify_face(
                 f"Terdeteksi {len(faces_absen)} wajah pada foto. Sistem memilih wajah "
                 f"yang paling dominan/dekat kamera untuk diverifikasi."
             )
-            logger.warning(f"[MULTI_FACE] {len(faces_absen)} wajah terdeteksi, memilih wajah utama")
+            logger.warning(
+                f"[MULTI_FACE] {len(faces_absen)} wajah terdeteksi, memilih wajah utama"
+            )
 
-        # ── Verifikasi utama (retinaface dengan fallback opencv) ──
         result, detector_used = verify_with_fallback(path_absen, path_referensi)
 
         distance = float(result["distance"])
         threshold = float(result["threshold"])
-
         effective_threshold = threshold + VERIFIED_MARGIN
         verified = distance <= effective_threshold
 
@@ -324,13 +322,7 @@ async def verify_face_visualize(
     foto_absen: UploadFile = File(...),
     foto_referensi: UploadFile = File(...),
 ):
-    """
-    Endpoint debugging: jalankan deteksi wajah pada foto kehadiran, gambar
-    bounding box (hijau = wajah utama yang dipakai, oranye = diabaikan),
-    dan kembalikan gambar hasil + hasil verifikasi sebagai JSON.
-    """
     import base64
-
     tmp_dir = tempfile.mkdtemp()
     try:
         path_absen = os.path.join(tmp_dir, "absen.jpg")
@@ -342,7 +334,6 @@ async def verify_face_visualize(
 
         faces_absen = detect_faces_with_boxes(path_absen, PREFERRED_DETECTOR)
         main_face = select_main_face(faces_absen)
-
         draw_bounding_boxes(path_absen, faces_absen, main_face, path_bbox_output)
 
         with open(path_bbox_output, "rb") as f:
@@ -374,7 +365,6 @@ async def verify_face_visualize(
             "hasil_verifikasi": verify_result,
             "foto_absen_dengan_bbox": f"data:image/jpeg;base64,{bbox_image_b64}",
         }
-
     finally:
         shutil.rmtree(tmp_dir, ignore_errors=True)
 
@@ -384,11 +374,6 @@ async def verify_face_debug(
     foto_absen: UploadFile = File(...),
     foto_referensi: UploadFile = File(...),
 ):
-    """
-    Endpoint debugging: jalankan verifikasi dengan BEBERAPA detector backend
-    sekaligus (opencv, retinaface, mtcnn) dan kembalikan semua hasilnya untuk
-    dibandingkan. JANGAN dipakai di endpoint produksi utama (lambat).
-    """
     tmp_dir = tempfile.mkdtemp()
     try:
         path_absen = os.path.join(tmp_dir, "absen.jpg")
@@ -413,7 +398,6 @@ async def verify_face_debug(
                 effective_threshold = threshold + VERIFIED_MARGIN
                 raw_confidence = 1 - (distance / (threshold * CONFIDENCE_SCALE_FACTOR))
                 confidence = max(0.0, min(1.0, raw_confidence))
-
                 results[backend] = {
                     "status": "ok",
                     "distance": round(distance, 4),
@@ -430,7 +414,6 @@ async def verify_face_debug(
 
         logger.info(f"[DEBUG_COMPARE] results={results}")
         return {"comparison": results}
-
     finally:
         shutil.rmtree(tmp_dir, ignore_errors=True)
 
