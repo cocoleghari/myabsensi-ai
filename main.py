@@ -83,23 +83,41 @@ def preprocess_image(raw_bytes: bytes, save_path: str) -> dict:
     img_bgr = resize_standard(img_bgr)
 
     gray = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2GRAY)
+    h, w = gray.shape
     mean_brightness = float(np.mean(gray))
 
+    # ── Deteksi backlight ──────────────────────────────────────────
+    # Foto selfie di depan jendela/outdoor sering punya background terang
+    # tapi wajah (area tengah) justru lebih gelap — brightness rata-rata
+    # keseluruhan foto terlihat "cukup" padahal area wajah underexposed.
+    # Deteksi dengan membandingkan brightness area tengah (50% x 50% frame,
+    # tempat wajah biasanya berada) vs brightness keseluruhan.
+    center_y1, center_y2 = h // 4, 3 * h // 4
+    center_x1, center_x2 = w // 4, 3 * w // 4
+    center_brightness = float(np.mean(gray[center_y1:center_y2, center_x1:center_x2]))
+    is_backlight = (mean_brightness - center_brightness) > 25  # background jauh lebih terang dari tengah
+
     is_dark = mean_brightness < DARKNESS_THRESHOLD
+    needs_enhancement = is_dark or is_backlight
+
     denoised = False
-    if is_dark:
+    if needs_enhancement:
         img_bgr = apply_clahe_enhancement(img_bgr)
-        img_bgr = apply_denoise(img_bgr)
-        denoised = True
+        if is_dark:  # denoise hanya untuk foto gelap, bukan backlight
+            img_bgr = apply_denoise(img_bgr)
+            denoised = True
 
     img_rgb_final = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2RGB)
     final_img = Image.fromarray(img_rgb_final)
     final_img.save(save_path, "JPEG", quality=95)
 
     return {
-        "enhanced": is_dark,
+        "enhanced": needs_enhancement,
         "denoised": denoised,
+        "is_dark": is_dark,
+        "is_backlight": is_backlight,
         "mean_brightness": round(mean_brightness, 1),
+        "center_brightness": round(center_brightness, 1),
         "original_size": original_size,
         "final_size": final_img.size,
     }
