@@ -18,55 +18,16 @@ app = FastAPI()
 # KONFIGURASI
 # ══════════════════════════════════════════════════════════════════════
 
-# ── Keputusan verified ──────────────────────────────────────────────
-# PENTING: keputusan verified/tidak berbasis threshold ASLI dari DeepFace
-# (result["threshold"], untuk Facenet512 = 0.30), bukan confidence buatan
-# sendiri. Threshold ini sudah dikalibrasi DeepFace untuk model & metric
-# yang dipakai (cosine distance Facenet512).
-#
-# PERINGATAN KERAS — JANGAN NAIKKAN MARGIN INI TANPA VALIDASI KEAMANAN:
-# Pengujian lapangan menemukan distance untuk DUA ORANG BERBEDA bisa
-# serendah 0.25-0.43 — overlap dengan distance kondisi sulit (gelap/
-# ekspresi beda) milik orang yang SAMA. Ini adalah keterbatasan statistik
-# bawaan model face-embedding 2D, BUKAN sesuatu yang bisa dihilangkan
-# hanya dengan menaikkan margin. Margin besar = false-accept lebih sering.
-# Default margin kecil ini DISENGAJA demi keamanan: lebih baik user disuruh
-# foto ulang (false-reject) daripada orang lain berhasil absen menggantikan
-# orang lain (false-accept).
 VERIFIED_MARGIN = 0.05
-
-# Confidence (0-100%) untuk DISPLAY ke user saja, tidak dipakai untuk
-# keputusan verified. Diskalakan relatif ke threshold asli DeepFace.
 CONFIDENCE_SCALE_FACTOR = 2.0
-
-# ── Detector backend ──────────────────────────────────────────────
-# retinaface jauh lebih akurat untuk selfie miring / low-light dibanding
-# opencv, tapi lebih berat & butuh package tambahan (retina-face). Kalau
-# gagal load/crash, otomatis fallback ke opencv supaya service tidak down.
 PREFERRED_DETECTOR = "retinaface"
 FALLBACK_DETECTOR = "opencv"
-
-# ── Resize standar ──────────────────────────────────────────────
-# Semua foto di-resize ke lebar maksimum ini SEBELUM diproses (mempertahankan
-# aspect ratio). Tujuannya: konsistensi input ke detector & model (foto dari
-# kamera HP modern bisa 3000-4000px, jauh lebih besar dari yang dibutuhkan
-# model, dan memperlambat proses tanpa menambah akurasi).
 STANDARD_MAX_WIDTH = 800
-
-# ── CLAHE (kontras adaptif untuk kondisi gelap) ──────────────────────
-# Hanya diterapkan kalau brightness rata-rata foto di bawah threshold ini,
-# supaya foto yang sudah cukup terang tidak diubah secara tidak perlu.
 DARKNESS_THRESHOLD = 100
 CLAHE_CLIP_LIMIT = 2.5
 CLAHE_GRID_SIZE = (8, 8)
-
-# ── Denoise ──────────────────────────────────────────────
-# Diterapkan HANYA kalau foto terdeteksi gelap (noise kamera HP paling
-# terasa di kondisi minim cahaya). Memakai fastNlMeansDenoisingColored,
-# dengan parameter ringan agar tidak menghaluskan detail wajah berlebihan
-# (over-denoise bisa menghilangkan fitur yang justru dibutuhkan model).
-DENOISE_H = 7          # kekuatan filter untuk komponen luminance
-DENOISE_H_COLOR = 7    # kekuatan filter untuk komponen warna
+DENOISE_H = 7
+DENOISE_H_COLOR = 7
 DENOISE_TEMPLATE_SIZE = 7
 DENOISE_SEARCH_SIZE = 21
 
@@ -121,13 +82,12 @@ def preprocess_image(raw_bytes: bytes, save_path: str) -> dict:
     Return dict info preprocessing untuk logging/debugging.
     """
     img = Image.open(io.BytesIO(raw_bytes)).convert("RGB")
-    img = ImageOps.exif_transpose(img)  # fix rotasi EXIF
-    original_size = img.size  # (width, height)
+    img = ImageOps.exif_transpose(img)
+    original_size = img.size
 
     img_array = np.array(img)
     img_bgr = cv2.cvtColor(img_array, cv2.COLOR_RGB2BGR)
 
-    # Resize standar SEBELUM analisa brightness, supaya konsisten
     img_bgr = resize_standard(img_bgr)
 
     gray = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2GRAY)
@@ -170,7 +130,7 @@ def detect_faces_with_boxes(image_path: str, detector_backend: str) -> list:
         faces = DeepFace.extract_faces(
             img_path=image_path,
             detector_backend=detector_backend,
-            enforce_detection=False,  # jangan raise di sini, kita validasi manual
+            enforce_detection=False,
             align=False,
         )
     except Exception as e:
@@ -195,9 +155,7 @@ def detect_faces_with_boxes(image_path: str, detector_backend: str) -> list:
 def select_main_face(boxes: list):
     """
     Kalau ada lebih dari satu wajah terdeteksi, pilih wajah UTAMA dengan
-    heuristik: area bounding box terbesar (asumsinya wajah yang paling
-    dekat ke kamera / paling dominan dalam frame adalah wajah yang absen,
-    bukan orang lain yang lewat di background).
+    heuristik: area bounding box terbesar.
     """
     if not boxes:
         return None
@@ -207,8 +165,7 @@ def select_main_face(boxes: list):
 def draw_bounding_boxes(image_path: str, boxes: list, main_box, output_path: str):
     """
     Gambar bounding box di atas foto untuk visualisasi/debugging.
-    Wajah utama (yang dipakai untuk verifikasi) digambar hijau, wajah
-    lain (terdeteksi tapi diabaikan) digambar oranye dengan label.
+    Wajah utama digambar hijau, wajah lain digambar oranye.
     """
     img = cv2.imread(image_path)
     if img is None:
@@ -217,7 +174,7 @@ def draw_bounding_boxes(image_path: str, boxes: list, main_box, output_path: str
     for box in boxes:
         x, y, w, h = box["x"], box["y"], box["w"], box["h"]
         is_main = main_box is not None and box is main_box
-        color = (0, 200, 0) if is_main else (0, 165, 255)  # BGR: hijau / oranye
+        color = (0, 200, 0) if is_main else (0, 165, 255)
         label = "WAJAH UTAMA" if is_main else "diabaikan"
 
         cv2.rectangle(img, (x, y), (x + w, y + h), color, 2)
@@ -251,7 +208,6 @@ def verify_with_fallback(path_absen: str, path_referensi: str):
         result = run_verify(path_absen, path_referensi, PREFERRED_DETECTOR)
         return result, PREFERRED_DETECTOR
     except ValueError:
-        # Wajah memang tidak terdeteksi -> jangan ditelan, lempar lagi
         raise
     except Exception as backend_err:
         logger.warning(
@@ -281,11 +237,13 @@ async def verify_face(
             f"[PREPROCESS] foto_absen={absen_info} | foto_referensi={ref_info}"
         )
 
-        # ── Validasi jumlah wajah pada foto kehadiran ──
-        # Foto referensi tidak divalidasi multi-wajah karena itu foto yang
-        # disetel admin/HR (terkontrol), sementara foto kehadiran diambil
-        # bebas oleh user dan lebih rawan ada orang lain di background.
-        faces_absen = detect_faces_with_boxes(path_absen, PREFERRED_DETECTOR)
+        # ── Validasi jumlah wajah pakai FALLBACK_DETECTOR (opencv) yang lebih ringan ──
+        # FIX: sebelumnya pakai PREFERRED_DETECTOR (retinaface) sehingga retinaface
+        # dipanggil DUA KALI per request (sekali di sini, sekali di verify_with_fallback).
+        # Sekarang validasi jumlah wajah cukup pakai opencv — cepat, ringan, dan akurat
+        # untuk mendeteksi ada/tidaknya wajah. Retinaface hanya dipakai SEKALI di
+        # verify_with_fallback untuk akurasi pengenalan wajah yang lebih tinggi.
+        faces_absen = detect_faces_with_boxes(path_absen, FALLBACK_DETECTOR)
         multi_face_warning = None
 
         if len(faces_absen) == 0:
@@ -370,9 +328,6 @@ async def verify_face_visualize(
     Endpoint debugging: jalankan deteksi wajah pada foto kehadiran, gambar
     bounding box (hijau = wajah utama yang dipakai, oranye = diabaikan),
     dan kembalikan gambar hasil + hasil verifikasi sebagai JSON.
-
-    Gambar bounding box dikembalikan sebagai base64 JPEG di field
-    'foto_absen_dengan_bbox' supaya bisa langsung ditampilkan/disimpan.
     """
     import base64
 
